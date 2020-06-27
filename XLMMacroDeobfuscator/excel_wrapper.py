@@ -1,7 +1,11 @@
 from enum import Enum
 
 
-class ExcelWrapper:
+class ExcelWrapper(object):
+
+    def __init__(self):
+        pass
+
     def get_xl_international_char(self, flag_name):
         pass
 
@@ -24,9 +28,7 @@ class XlApplicationInternational(Enum):
     xlListSeparator = 5
     xlRightBracket = 11
 
+
 class RowAttribute(Enum):
     Height = 0
     Spans = 1
-
-
-

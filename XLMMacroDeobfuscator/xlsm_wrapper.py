@@ -30,7 +30,6 @@ class XLSMWrapper(ExcelWrapper):
         self._types = self._get_types()
         self.color_maps = None
 
-
     def _get_types(self):
         result = {}
         if self._types is None:
@@ -108,7 +107,7 @@ class XLSMWrapper(ExcelWrapper):
             workbook_path = self._types['application/vnd.ms-excel.sheet.macroEnabled.main+xml']
         workbook_path = workbook_path.lstrip('/')
 
-        path=''
+        path = ''
         name = workbook_path
 
         if '/' in workbook_path:
@@ -150,9 +149,9 @@ class XLSMWrapper(ExcelWrapper):
             style_type = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles'
             relationships = self._get_relationships()
             if style_type in relationships:
-                style_sheet_path= relationships[style_type]
+                style_sheet_path = relationships[style_type]
                 _, base_dir, _ = self._get_workbook_path()
-                style_sheet = self.get_xml_file(base_dir+'/'+style_sheet_path)
+                style_sheet = self.get_xml_file(base_dir + '/' + style_sheet_path)
             self._workbook_style = style_sheet
 
         return self._workbook_style
@@ -232,11 +231,11 @@ class XLSMWrapper(ExcelWrapper):
             content = self.get_xml_file(base_dir + '/sharedStrings.xml')
             if content is not None:
                 if hasattr(content, 'sst') and hasattr(content.sst, 'si'):
-                    for str in content.sst.si:
+                    for str_ in content.sst.si:
                         if self._shared_strings is None:
                             self._shared_strings = []
-                        if hasattr(str, 't'):
-                            self._shared_strings.append(str.t.cdata)
+                        if hasattr(str_, 't'):
+                            self._shared_strings.append(str_.t.cdata)
         return self._shared_strings
 
     def load_cells(self, macrosheet, macrosheet_obj):
@@ -260,7 +259,7 @@ class XLSMWrapper(ExcelWrapper):
                         formula_text = ('=' + formula.cdata) if formula is not None else None
                     value_text = None
                     is_string = False
-                    if 't' in cell_elm._attributes and cell_elm.get_attribute('t')=='s':
+                    if 't' in cell_elm._attributes and cell_elm.get_attribute('t') == 's':
                         is_string = True
 
                     if hasattr(cell_elm, 'v'):
@@ -388,7 +387,6 @@ class XLSMWrapper(ExcelWrapper):
                         break
                 NotImplemented = True
 
-
             if info_type_id == 8:
                 h_align_map = {
                     'general': 1,
@@ -450,7 +448,6 @@ class XLSMWrapper(ExcelWrapper):
 
         # return None, None, True
         return data, not_exist, not_implemented
-
 
 
 if __name__ == '__main__':

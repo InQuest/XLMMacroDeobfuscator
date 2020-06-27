@@ -45,7 +45,7 @@ class XLSWrapper2(ExcelWrapper):
             for index, (name_obj, cell) in enumerate(name_objects.items()):
                 name = self.remove_nonprintable_chars(name_obj).lower()
                 if name in self._defined_names:
-                    name = name + index
+                    name = '{}{}'.format(name, index)
                 if cell[0].result is not None:
                     self._defined_names[name] = cell[0].result.text
 

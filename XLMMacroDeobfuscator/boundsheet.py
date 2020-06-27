@@ -1,7 +1,7 @@
 import re
 
 
-class Cell:
+class Cell(object):
     _cell_addr_regex_str = r"((?P<sheetname>[^\s]+?|'.+?')!)?\$?(?P<column>[a-zA-Z]+)\$?(?P<row>\d+)"
     _cell_addr_regex = re.compile(_cell_addr_regex_str)
 
@@ -17,8 +17,10 @@ class Cell:
         # return default value if attributes doesn't cointain the attribute_name
         pass
 
-    def __deepcopy__(self, memodict={}):
+    def __deepcopy__(self, memodict=None):
         copy = Cell()
+        if not memodict:
+            memodict = {}
         memodict[id(self)] = copy
         copy.sheet = self.sheet
         copy.column = self.column
@@ -32,7 +34,7 @@ class Cell:
         return self.column + str(self.row)
 
     def __str__(self):
-        return "'{}'!{}".format(self.sheet.name,self.get_local_address())
+        return "'{}'!{}".format(self.sheet.name, self.get_local_address())
 
     @staticmethod
     def convert_to_column_index(s):
@@ -73,7 +75,7 @@ class Cell:
         return point
 
 
-class Boundsheet:
+class Boundsheet(object):
     def __init__(self, name, type):
         self.name = name
         self.type = type
@@ -88,9 +90,7 @@ class Boundsheet:
 
     def get_col_attribute(self, col, attrib_name):
         # default value if row doesn't exist in row_attributes
-
         pass
-
 
     def add_cell(self, cell):
         cell.sheet = self
